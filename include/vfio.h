@@ -1,5 +1,24 @@
 #pragma once
 
+#include <errno.h>
+#include <fcntl.h>
+#include <libgen.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+#include <linux/vfio.h>
+#include <pthread.h>
+#include "nvme.h"
+
 
 
 /// Starting device DMA address
@@ -9,8 +28,12 @@
 #define VFIO_PASIZE(n)      (((n) + 0xfff) & ~0xfff)
 
 
-#define MAX_MSIX_VECTOR_NUM                 1
-#define MAX_IO_Q_PAIR_NUM               32
+#define MAX_ADMIN_Q_PAIR_NUM 1
+#define MAX_IO_Q_PAIR_NUM 1
+#define MAX_Q_PAIR_NUM    (MAX_ADMIN_Q_PAIR_NUM + MAX_IO_Q_PAIR_NUM)
+
+#define MAX_MSIX_VECTOR_NUM  (MAX_Q_PAIR_NUM)
+
 
 
 static const char* region_name[VFIO_PCI_NUM_REGIONS] = {"BAR0", "BAR1", "BAR2", "BAR3", "BAR4", "BAR5", "ROM", "CONFIG", "VGA"};
@@ -52,12 +75,13 @@ typedef struct _nvme_queue_pair {
     int                             sq_tail = 0;   
     int                             cq_head = 0;   
     int                             cq_phase =1;   
+
     pthread_mutex_t                 sq_lock;
     pthread_mutex_t                 cq_lock;
 
 
-    pthread_mutex_t sync_cmd_mutex;
-    pthread_cond_t sync_cmd_cond;
+    pthread_mutex_t                 sync_mutex;
+    pthread_cond_t                  sync_cond;
 
 
 } nvme_queue_pair_t;
@@ -77,12 +101,17 @@ typedef struct _nvme_dev {
 
     nvme_controller_reg_t*          ctrl_reg = nullptr;
 
+    int                             dstrd = 0;
+
     vfio_dma_t*                     admin_sq = nullptr;
     vfio_dma_t*                     admin_cq = nullptr;
-    nvme_queue_pair_t               admin_q_pair;
 
-    nvme_queue_pair_t               io_q_pair[MAX_IO_Q_PAIR_NUM];
-    int                             current_io_q_pair_num = 0;
+    nvme_queue_pair_t               q_pair[MAX_Q_PAIR_NUM];     // QID = 0 : admin queue
+                                                // other : io queue
+    //nvme_queue_pair_t             admin_q_pair;
+    //nvme_queue_pair_t             io_q_pair[MAX_IO_Q_PAIR_NUM];                  
+    
+    int                             current_io_q_pair_num;
 
     struct vfio_device_info         device_info;
     struct vfio_group_status        group_status;
@@ -99,6 +128,8 @@ typedef struct _nvme_dev {
 
 bool map_bar0(nvme_dev_t * dev);
 void unmap_bar0(nvme_dev_t* dev);
+
+int init_nvme_ctrl(nvme_dev_t* dev, size_t sq_sz, size_t cq_sz);
 
 
 vfio_dma_t* dma_alloc(nvme_dev_t* vdev, size_t size);
@@ -118,9 +149,9 @@ void check_cq(nvme_queue_pair_t* q);
 
 void nvme_submit_cmd(nvme_queue_pair_t* q);
 
-int nvme_ctrl_disable(nvme_dev_t* dev);
+//int nvme_ctrl_disable(nvme_dev_t* dev);
 
-int nvme_ctrl_enable(nvme_dev_t* dev, nvme_controller_config_t *cc);
+//int nvme_ctrl_enable(nvme_dev_t* dev, nvme_controller_config_t *cc);
 
 /**
  * @fn
@@ -130,14 +161,15 @@ int nvme_ctrl_enable(nvme_dev_t* dev, nvme_controller_config_t *cc);
  * @return 戻り値の説明
 
  */
-int init_device(nvme_dev_t* dev, size_t sq_sz, size_t cq_sz);
+//int init_device(nvme_dev_t* dev, size_t sq_sz, size_t cq_sz);
 
 
 
 
 
 
-nvme_dev_t* create_instance(int segn, int busn, int devn, int funcn);
+
+//nvme_dev_t* create_instance(int segn, int busn, int devn, int funcn);
 
 
-void delete_instance(nvme_dev_t* vdev);
+//void delete_instance(nvme_dev_t* vdev);

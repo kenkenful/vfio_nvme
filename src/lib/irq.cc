@@ -25,8 +25,10 @@
 
     for (int i = 0; i < MAX_MSIX_VECTOR_NUM; i++) {
         dev->efds[i] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-        if(dev->efds[i] < 0)printf("efd init failed\n");
-
+        if(dev->efds[i] < 0){
+            printf("efd init failed\n");
+            return -1;
+        }
     }
     memcpy((int*)&irq_set->data, dev->efds, sizeof(dev->efds));
     int ret = ioctl(dev->fd, VFIO_DEVICE_SET_IRQS, irq_set);
@@ -35,9 +37,7 @@
         printf("faield to enable MSI-X interrupt\n");
         return -1;    
     }
-
     return 0;
-
 }
 
 int disable_msix(nvme_dev_t* vdev)
@@ -118,7 +118,7 @@ int disable_intx(nvme_dev_t* dev){
     irq_set->index = VFIO_PCI_INTX_IRQ_INDEX;
     irq_set->start = 0;
   
-    *(int*)&irq_set->data = dev->efd;
+    //*(int*)&irq_set->data = dev->efd;
     int ret = ioctl(dev->fd, VFIO_DEVICE_SET_IRQS, irq_set);
     if(ret != 0){
         printf("Error masking INTx interrupts \n");
@@ -126,7 +126,8 @@ int disable_intx(nvme_dev_t* dev){
     }
 
 	/* disable INTx*/
-	irq_set->argsz = sizeof(irq_set_buf);
+	memset(irq_set, 0, sizeof(struct vfio_irq_set));
+    irq_set->argsz = sizeof(irq_set_buf);
 	irq_set->count = 0;
 	irq_set->flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_TRIGGER;
 	irq_set->index = VFIO_PCI_INTX_IRQ_INDEX;
@@ -148,7 +149,7 @@ void* interrupt_hadler(void* p) {
     dev->epfd = epoll_create1(EPOLL_CLOEXEC);
     if(dev->epfd < 0){
         printf( "failed to create epoll fd\n");
-        return nullptr;
+        exit(1);
     }
    
     // Add eventfd to epoll
@@ -162,7 +163,7 @@ void* interrupt_hadler(void* p) {
         int ret = epoll_ctl(dev->epfd, EPOLL_CTL_ADD, dev->efds[i], &ev);
         if(ret != 0){
             printf("cannot add fd to epoll\n");
-            return nullptr;
+            exit(1);
         }
     }
 
@@ -173,39 +174,50 @@ void* interrupt_hadler(void* p) {
     int ret = epoll_ctl(dev->epfd, EPOLL_CTL_ADD, dev->efd, &ev);
     if(ret != 0){
         printf("cannot add fd to epoll\n");
-        return nullptr;
+        exit(1);
     }
 
 #endif
 
     struct epoll_event evs;
-    u32 rx_idx = 0;
-    
+    u64 u;
+
     for (;;) {
         printf("waiting interrupts...\n");
         // blocking wait
         int rc = epoll_wait(dev->epfd, &evs, 1, -1);
         if(rc <= 0){
             printf("epoll error\n");
-            return nullptr;
+            exit(1);
         }
 
-        u64 u;
         ssize_t s = read(evs.data.fd, &u, sizeof(u));
         if(s != sizeof(u)){
             printf("efd read failed\n");
         }
 
 #if defined(MSIX)
-        if (evs.data.fd == dev->efds[0]) {  //  Admin Command
-            printf("MSIx vector 0 interrupt cuured\n");
-            check_cq(&dev ->admin_q_pair);
+        for(int i=0; i<MAX_MSIX_VECTOR_NUM; ++i){
+            if (evs.data.fd == dev->efds[i]) {
+                check_cq(&dev ->q_pair[i]);
+                if(i == 0){
+                    printf("MSIx vector 0 interrupt ocuured\n");           
+                }else{
+                    printf("MSIx vector %d interrupt ocuured\n", i);
+                }
+                break;
+            }
         }
-      
+
 #elif defined(INTx)
         printf("INTx occured\n");
-        check_cq(&dev ->admin_q_pair);
-        unmask_intx(dev);
+        check_cq(&dev ->q_pair[0]);
+
+        for(int i=1; i< dev->current_io_q_pair_num + 1; ++i) check_cq(&dev ->q_pair[i]);
+        
+        if(unmask_intx(dev) != 0){
+            printf("Error: umask intx\n");
+        }
 
 #endif
 

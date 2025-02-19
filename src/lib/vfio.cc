@@ -1,28 +1,35 @@
-#include <errno.h>
-#include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/ioctl.h>
-#include <sys/mman.h>
-#include <unistd.h>
-
-#include <linux/vfio.h>
-#include <pthread.h>
-#include "nvme.h"
-
 #include "vfio.h"
-
 
 
 uintptr_t virt_to_phys(void* virt) {
     long pagesize = sysconf(_SC_PAGESIZE);
     int fd = open("/proc/self/pagemap", O_RDONLY);
+
+    if(fd == -1){
+        printf("failed to open /proc/self/pagemap\n");
+        return (uintptr_t)0;
+    }
+
    // ASSERT(fd != -1, "failed to open /proc/self/pagemap");
     off_t ret = lseek(fd, (uintptr_t)virt / pagesize * sizeof(uintptr_t), SEEK_SET);
-    //ASSERT(ret != -1, "lseek error");
+    
+    if(ret == -1){
+        printf("lseek error\n");
+        return (uintptr_t)0;
+    }
+
     uintptr_t entry = 0;
     ssize_t rc = read(fd, &entry, sizeof(entry));
+    if(rc <= 0){
+        printf("read error\n");
+        return (uintptr_t)0;
+    }
+
+    if(entry == 0){
+        printf("failed to get physical address for %p (perhaps forgot sudo?)", virt);
+        return (uintptr_t)0;
+    }
+
     //ASSERT(rc > 0, "read error");
     //ASSERT(entry != 0,"failed to get physical address for %p (perhaps forgot sudo?)",virt);
     close(fd);
@@ -106,26 +113,69 @@ void disable_bus_master(nvme_dev_t* dev){
 
 
 void check_cq(nvme_queue_pair_t* q){
+    printf("QID: %d\n", q ->id);
+
+    printf("%s, %s, %d\n", __FILE__, __func__, __LINE__);
+
     pthread_mutex_lock(&q->cq_lock);
+    printf("path1\n");
+
+    printf("%d\n" , q->cq[q -> cq_head].p);
+    printf("%d\n" , q -> cq_phase);
+
 
     if(q->cq[q -> cq_head].p == q -> cq_phase){
+        printf("path2\n");
         while(q->cq[q -> cq_head].p == q -> cq_phase){
             int head = q -> cq_head;
-            printf("sqid: %d, cid: %d,  sc: %d, sct: %d \n", q->cq[head].sqid, q->cq[head].cid, q->cq[head].sc, q->cq[head].sct);
+            printf("sqid: %d, cid: %d, sc: %d, sct: %d \n", q->cq[head].sqid, q->cq[head].cid, q->cq[head].sc, q->cq[head].sct);
             if(++q ->cq_head == q-> cq_size){
                 q -> cq_head = 0;
                 q -> cq_phase = !q->cq_phase;
             }
 
-            *(volatile u32*)(q->cq_doorbell) = q -> cq_head; 
-
-            pthread_mutex_lock(&q->sync_cmd_mutex);
-            pthread_cond_signal(&q->sync_cmd_cond);
-            pthread_mutex_unlock(&q->sync_cmd_mutex);
+#if defined(MSIX) || defined(INTx)
+            pthread_mutex_lock(&q->sync_mutex);
+            pthread_cond_signal(&q->sync_cond);
+            pthread_mutex_unlock(&q->sync_mutex);
+#endif
 
         }
+
+        *(volatile u32*)(q->cq_doorbell) = q -> cq_head; 
     }
 
+    pthread_mutex_unlock(&q->cq_lock);
+        printf("%s, %s, %d\n", __FILE__, __func__, __LINE__);
+
+}
+
+
+void nvme_check_completion(nvme_queue_pair_t *q){
+    nvme_cq_entry_t *cqe;
+
+    pthread_mutex_lock(&q->cq_lock);
+
+    for(;;){
+        cqe = &q->cq[q->cq_head];
+        if(cqe ->p != q->cq_phase) break;
+
+        if(++q ->cq_head == q->cq_size){
+            q->cq_head = 0;
+            q->cq_phase = !q->cq_phase;
+
+        }
+        *(volatile u32*)(q->cq_doorbell) = q -> cq_head; 
+
+        printf("sqid: %x, cid: %x, sc: %x, sct: %x\n", cqe ->sqid, cqe->cid, cqe->sc, cqe->sct);
+
+#if defined(MSIX) || defined(INTx)
+        pthread_mutex_lock(&q->sync_mutex);
+        pthread_cond_signal(&q->sync_cond);
+        pthread_mutex_unlock(&q->sync_mutex);
+#endif
+
+    }
     pthread_mutex_unlock(&q->cq_lock);
 
 }
@@ -194,14 +244,11 @@ int nvme_ctrl_enable(nvme_dev_t* dev, nvme_controller_config_t *cc){
  * @return 戻り値の説明
 
  */
-int init_device(nvme_dev_t* dev, size_t sq_sz, size_t cq_sz){
+int init_nvme_ctrl(nvme_dev_t* dev, size_t sq_sz, size_t cq_sz){
 
     nvme_controller_cap_t cap   = {0};
     nvme_adminq_attr_t aqa      = {0};
     nvme_controller_config_t cc = {0};
-
-    pthread_mutex_init(&dev->admin_q_pair.sync_cmd_mutex, NULL);
-    pthread_cond_init(&dev->admin_q_pair.sync_cmd_cond, NULL);
 
 
     nvme_ctrl_disable(dev);  /* コントローラをnot readyにする */
@@ -210,32 +257,43 @@ int init_device(nvme_dev_t* dev, size_t sq_sz, size_t cq_sz){
     printf("cap: %lx\n", dev->ctrl_reg->cap.val);
     printf("vs: %x\n", dev->ctrl_reg->vs.val);
 
-    pthread_mutex_init(&dev -> admin_q_pair. cq_lock, nullptr);
-    pthread_mutex_init(&dev -> admin_q_pair. sq_lock, nullptr);
+    pthread_mutex_init(&dev -> q_pair[0]. cq_lock, nullptr);
+    pthread_mutex_init(&dev -> q_pair[0]. sq_lock, nullptr);
 
 
-    cap . val = dev -> ctrl_reg -> cap.val;
+    //cap . val = dev -> ctrl_reg -> cap.val;
 
-    dev -> admin_q_pair . dev = dev;
-    dev -> admin_q_pair . id = 0;
-    dev -> admin_q_pair . sq_size = sq_sz;
-    dev -> admin_q_pair . cq_size = cq_sz;
+    dev -> q_pair[0] . dev = dev;
+    dev -> q_pair[0] . id = 0;
+    dev -> q_pair[0] . sq_size = sq_sz;
+    dev -> q_pair[0] . cq_size = cq_sz;
 
     /*  CQ phase tagとCQ Head、SQ tailを初期化する */
-    dev -> admin_q_pair . cq_phase = 1;
-    dev -> admin_q_pair . cq_head  = 0;
-    dev -> admin_q_pair . sq_tail  = 0;
+    dev -> q_pair[0] . cq_phase = 1;
+    dev -> q_pair[0] . cq_head  = 0;
+    dev -> q_pair[0] . sq_tail  = 0;
+
+
+    if(pthread_cond_init(&dev->q_pair[0].sync_cond, nullptr)){
+        perror("pthread_cond_init");
+        return -1;
+    }
+
+    if(pthread_mutex_init(&dev->q_pair[0].sync_mutex, nullptr)){
+        perror("pthread_mutex_init");
+        return -1;
+    }
 
 #if 1
     /*  CQ用のDMAメモリを確保する  */
-    dev -> admin_cq = dma_alloc(dev, dev->admin_q_pair.cq_size  * sizeof(nvme_cq_entry_t));
+    dev -> admin_cq = dma_alloc(dev, dev->q_pair[0].cq_size  * sizeof(nvme_cq_entry_t));
     if(dev ->admin_cq == nullptr) {
       printf("Error: allocate admin cq\n");
       return -1;
     }
 
     /*  SQ用のDMAメモリを確保する  */
-    dev ->admin_sq = dma_alloc(dev, dev->admin_q_pair.sq_size  * sizeof(nvme_sq_entry_t));
+    dev ->admin_sq = dma_alloc(dev, dev->q_pair[0].sq_size  * sizeof(nvme_sq_entry_t));
     if(dev ->admin_sq == nullptr) {
       printf("Error: allocate admin sq\n");
       return -1;
@@ -244,14 +302,14 @@ int init_device(nvme_dev_t* dev, size_t sq_sz, size_t cq_sz){
 
 #else
     /*  CQ用のDMAメモリを確保する  */
-    dev ->admin_cq = dma_aligned_alloc(dev, dev->admin_q_pair.sq_size * sizeof(nvme_sq_entry_t), 4096);
+    dev ->admin_cq = dma_aligned_alloc(dev, dev->q_pair[0].sq_size * sizeof(nvme_sq_entry_t), 4096);
     if(dev ->admin_cq == nullptr) {
       printf("Error: allocate admin cq\n");
       return -1;
     }
 
     /*  SQ用のDMAメモリを確保する  */
-    dev ->admin_sq = dma_aligned_alloc(dev, dev->admin_q_pair.sq_size * sizeof(nvme_sq_entry_t), 4096 );
+    dev ->admin_sq = dma_aligned_alloc(dev, dev->q_pair[0].sq_size * sizeof(nvme_sq_entry_t), 4096 );
     if(dev ->admin_sq == nullptr) {
       printf("Error: allocate admin sq\n");
       return -1;
@@ -259,12 +317,15 @@ int init_device(nvme_dev_t* dev, size_t sq_sz, size_t cq_sz){
 
 #endif
 
+    cap.val = dev -> ctrl_reg ->cap.val;
+    dev -> dstrd = cap.dstrd;
 
-    dev -> admin_q_pair.sq = (nvme_sq_entry_t*)dev ->admin_sq -> user_buf;
-    dev -> admin_q_pair.cq = (nvme_cq_entry_t*)dev ->admin_cq -> user_buf;
 
-    dev -> admin_q_pair.sq_doorbell = dev -> ctrl_reg -> sq0tdbl;
-    dev -> admin_q_pair.cq_doorbell = dev -> ctrl_reg -> sq0tdbl + (1<< cap.dstrd);
+    dev -> q_pair[0].sq = (nvme_sq_entry_t*)dev ->admin_sq -> user_buf;
+    dev -> q_pair[0].cq = (nvme_cq_entry_t*)dev ->admin_cq -> user_buf;
+
+    dev -> q_pair[0].sq_doorbell = dev -> ctrl_reg -> sq0tdbl;
+    dev -> q_pair[0].cq_doorbell = dev -> ctrl_reg -> sq0tdbl + (1<< dev->dstrd);
     
     dev -> ctrl_reg ->asq = dev ->admin_sq -> dma_addr;  /* asqレジスタにSQのDMAアドレスを設定する */
     dev -> ctrl_reg ->acq = dev ->admin_cq -> dma_addr;  /* acqレジスタにCQのDMAアドレスを設定する */
@@ -273,8 +334,8 @@ int init_device(nvme_dev_t* dev, size_t sq_sz, size_t cq_sz){
     printf("SQ DMA address: %lx\n", dev -> ctrl_reg ->asq);
     printf("CQ DMA address: %lx\n", dev -> ctrl_reg ->acq);
 
-    aqa.asqs = dev->admin_q_pair . sq_size -1;
-    aqa.acqs = dev->admin_q_pair . cq_size -1;
+    aqa.asqs = dev->q_pair[0] . sq_size -1;
+    aqa.acqs = dev->q_pair[0] . cq_size -1;
     dev -> ctrl_reg -> aqa.val = aqa.val;    /* aqaレジスタにSQ、CQのサイズを設定する */
 
 
