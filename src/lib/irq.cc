@@ -11,8 +11,7 @@
 #include "vfio.h"
 #include "irq.h"
 
-
- int enable_msix(nvme_dev_t* dev) {
+int enable_msix(nvme_dev_t* dev) {
     printf("Use MSI-X interrupt\n");
     struct vfio_irq_set* irq_set;
     char irq_set_buf[sizeof(struct vfio_irq_set) + sizeof(int) * MAX_MSIX_VECTOR_NUM];

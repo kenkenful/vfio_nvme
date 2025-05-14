@@ -1,5 +1,6 @@
 #include "vfio.h"
 
+bool no_iommu_mode = false;
 
 uintptr_t virt_to_phys(void* virt) {
     long pagesize = sysconf(_SC_PAGESIZE);
@@ -91,7 +92,6 @@ void unmap_bar0(nvme_dev_t* dev){
     dev -> ctrl_reg = nullptr;
 }
 
-
 void enable_bus_master( nvme_dev_t* dev) {
     struct vfio_region_info* cs_info = &dev->regs[VFIO_PCI_CONFIG_REGION_INDEX];
     char buf[2];
@@ -108,24 +108,18 @@ void disable_bus_master(nvme_dev_t* dev){
     *(u16*)(buf) &= ~((1) << (2));
     pwrite(dev->fd, buf, 2, cs_info->offset + 4);
     printf("PCI configuration space command reg = %04X\n", *(u16*)buf);
-
 }
-
 
 void check_cq(nvme_queue_pair_t* q){
     printf("QID: %d\n", q ->id);
-
     printf("%s, %s, %d\n", __FILE__, __func__, __LINE__);
 
     pthread_mutex_lock(&q->cq_lock);
-    printf("path1\n");
 
     printf("%d\n" , q->cq[q -> cq_head].p);
     printf("%d\n" , q -> cq_phase);
 
-
     if(q->cq[q -> cq_head].p == q -> cq_phase){
-        printf("path2\n");
         while(q->cq[q -> cq_head].p == q -> cq_phase){
             int head = q -> cq_head;
             printf("sqid: %d, cid: %d, sc: %d, sct: %d \n", q->cq[head].sqid, q->cq[head].cid, q->cq[head].sc, q->cq[head].sct);
@@ -146,7 +140,7 @@ void check_cq(nvme_queue_pair_t* q){
     }
 
     pthread_mutex_unlock(&q->cq_lock);
-        printf("%s, %s, %d\n", __FILE__, __func__, __LINE__);
+    printf("%s, %s, %d\n", __FILE__, __func__, __LINE__);
 
 }
 
@@ -180,8 +174,6 @@ void nvme_check_completion(nvme_queue_pair_t *q){
 
 }
 
-
-
 void nvme_submit_cmd(nvme_queue_pair_t* q)
 {
     pthread_mutex_lock(&q->sq_lock);
@@ -190,9 +182,6 @@ void nvme_submit_cmd(nvme_queue_pair_t* q)
     *(volatile u32*)q->sq_doorbell = q->sq_tail;
     pthread_mutex_unlock(&q->sq_lock);
 }
-
-
-
 
 int nvme_ctrl_wait_ready(nvme_dev_t *dev, int ready){
 
@@ -210,9 +199,7 @@ int nvme_ctrl_wait_ready(nvme_dev_t *dev, int ready){
     printf("timeout\n");
 
     return -1;
-
 }
-
 
 int nvme_ctrl_disable(nvme_dev_t* dev){
     nvme_controller_config_t cc;   
@@ -221,8 +208,6 @@ int nvme_ctrl_disable(nvme_dev_t* dev){
     dev ->ctrl_reg->cc.val = cc.val;
 
     return nvme_ctrl_wait_ready(dev ,0);
-
-
 }
 
 int nvme_ctrl_enable(nvme_dev_t* dev, nvme_controller_config_t *cc){
@@ -231,10 +216,7 @@ int nvme_ctrl_enable(nvme_dev_t* dev, nvme_controller_config_t *cc){
     cc_temp .en = 1;
     dev ->ctrl_reg->cc.val = cc_temp.val;
     return nvme_ctrl_wait_ready(dev, 1);
-
-
 }
-
 
 /**
  * @fn
@@ -245,11 +227,9 @@ int nvme_ctrl_enable(nvme_dev_t* dev, nvme_controller_config_t *cc){
 
  */
 int init_nvme_ctrl(nvme_dev_t* dev, size_t sq_sz, size_t cq_sz){
-
     nvme_controller_cap_t cap   = {0};
     nvme_adminq_attr_t aqa      = {0};
     nvme_controller_config_t cc = {0};
-
 
     nvme_ctrl_disable(dev);  /* コントローラをnot readyにする */
 
@@ -260,9 +240,7 @@ int init_nvme_ctrl(nvme_dev_t* dev, size_t sq_sz, size_t cq_sz){
     pthread_mutex_init(&dev -> q_pair[0]. cq_lock, nullptr);
     pthread_mutex_init(&dev -> q_pair[0]. sq_lock, nullptr);
 
-
     //cap . val = dev -> ctrl_reg -> cap.val;
-
     dev -> q_pair[0] . dev = dev;
     dev -> q_pair[0] . id = 0;
     dev -> q_pair[0] . sq_size = sq_sz;
@@ -272,7 +250,6 @@ int init_nvme_ctrl(nvme_dev_t* dev, size_t sq_sz, size_t cq_sz){
     dev -> q_pair[0] . cq_phase = 1;
     dev -> q_pair[0] . cq_head  = 0;
     dev -> q_pair[0] . sq_tail  = 0;
-
 
     if(pthread_cond_init(&dev->q_pair[0].sync_cond, nullptr)){
         perror("pthread_cond_init");
@@ -299,7 +276,6 @@ int init_nvme_ctrl(nvme_dev_t* dev, size_t sq_sz, size_t cq_sz){
       return -1;
     }
 
-
 #else
     /*  CQ用のDMAメモリを確保する  */
     dev ->admin_cq = dma_aligned_alloc(dev, dev->q_pair[0].sq_size * sizeof(nvme_sq_entry_t), 4096);
@@ -320,7 +296,6 @@ int init_nvme_ctrl(nvme_dev_t* dev, size_t sq_sz, size_t cq_sz){
     cap.val = dev -> ctrl_reg ->cap.val;
     dev -> dstrd = cap.dstrd;
 
-
     dev -> q_pair[0].sq = (nvme_sq_entry_t*)dev ->admin_sq -> user_buf;
     dev -> q_pair[0].cq = (nvme_cq_entry_t*)dev ->admin_cq -> user_buf;
 
@@ -338,7 +313,6 @@ int init_nvme_ctrl(nvme_dev_t* dev, size_t sq_sz, size_t cq_sz){
     aqa.acqs = dev->q_pair[0] . cq_size -1;
     dev -> ctrl_reg -> aqa.val = aqa.val;    /* aqaレジスタにSQ、CQのサイズを設定する */
 
-
     cc.val = NVME_CC_CSS_NVM;
     cc.val |= 0 << NVME_CC_MPS_SHIFT;
     cc.val |= NVME_CC_AMS_RR | NVME_CC_SHN_NONE;
@@ -352,12 +326,7 @@ int init_nvme_ctrl(nvme_dev_t* dev, size_t sq_sz, size_t cq_sz){
     printf("cc: %x\n", dev->ctrl_reg->cc.val);
    
     return 0;
-
-
 }
-
-
-
 
 static vfio_mem_t* vfio_mem_alloc(nvme_dev_t* dev, size_t size, void* pmb)
 {
@@ -376,7 +345,6 @@ static vfio_mem_t* vfio_mem_alloc(nvme_dev_t* dev, size_t size, void* pmb)
             goto error;
         }
         mem->mmap = 1;
-
     }
 
     memset(mem->dma.user_buf, 0, size);   // COW
@@ -389,11 +357,14 @@ static vfio_mem_t* vfio_mem_alloc(nvme_dev_t* dev, size_t size, void* pmb)
     dma_map.vaddr = (u64)mem->dma.user_buf;
     dma_map.iova = (u64)virt_to_phys(reinterpret_cast<void*>(mem->dma.user_buf));
 
-    if (ioctl(dev->contfd, VFIO_IOMMU_MAP_DMA, &dma_map) < 0) {
-        printf("ioctl VFIO_IOMMU_MAP_DMA errno %d\n", errno);
-        pthread_spin_unlock(&dev->lock);
-        goto error;
+    if(!no_iommu_mode){
+        if (ioctl(dev->contfd, VFIO_IOMMU_MAP_DMA, &dma_map) < 0) {
+            printf("ioctl VFIO_IOMMU_MAP_DMA errno %d\n", errno);
+            pthread_spin_unlock(&dev->lock);
+            goto error;
+        }
     }
+    
     mem->dma.size = size;
     mem->dma.dma_addr = dma_map.iova;
     mem->dma.id = mem;
@@ -436,10 +407,12 @@ static int vfio_mem_free(vfio_mem_t* mem)
     unmap.iova =  mem->dma.dma_addr;
 
     // unmap and free dma memory
-    if (mem->dma.user_buf) {
-        if (ioctl(dev->contfd, VFIO_IOMMU_UNMAP_DMA, &unmap) < 0) {
-            printf("ioctl VFIO_IOMMU_UNMAP_DMA errno %d\n", errno);
-            return -1;
+    if(!no_iommu_mode){
+        if (mem->dma.user_buf) {
+            if (ioctl(dev->contfd, VFIO_IOMMU_UNMAP_DMA, &unmap) < 0) {
+                printf("ioctl VFIO_IOMMU_UNMAP_DMA errno %d\n", errno);
+                return -1;
+            }
         }
     }
 
@@ -488,7 +461,6 @@ vfio_dma_t* dma_alloc(nvme_dev_t* vdev, size_t size)
     return mem ? &mem->dma : nullptr;
 }
 
-
 /**
  * @fn
  * @brief 　メモリのアライメントを指定して、DMA転送用のメモリーを確保する。
@@ -516,8 +488,6 @@ int dma_free(vfio_dma_t* dma)
 {
     return vfio_mem_free((vfio_mem_t*)dma->id);
 }
-
-
 
 nvme_dev_t* create_instance(int segn, int busn, int devn, int funcn)
 {
@@ -580,36 +550,63 @@ nvme_dev_t* create_instance(int segn, int busn, int devn, int funcn)
         printf("ioctl VFIO_GET_API_VERSION\n");
         goto error;
     }
-    if (ioctl(dev->contfd, VFIO_CHECK_EXTENSION, VFIO_TYPE1_IOMMU) == 0) {
-        printf("ioctl VFIO_CHECK_EXTENSION\n");
-        goto error;
-    }
 
     sprintf(path, "/dev/vfio/%d", vfid);
     if ((dev->groupfd = open(path, O_RDWR)) < 0) {
         printf("open %s failed\n", path);
-        goto error;
+
+        sprintf(path, "/dev/vfio/noiommu-%d", vfid);
+        if ((dev->groupfd = open(path, O_RDWR)) < 0) {
+            printf("open %s failed\n", path);
+            goto error;
+        }else{
+            no_iommu_mode = true;
+            printf("-> NO IOMMU Mode\n");
+        }
+
+    }else{
+        printf("-> IOMMU Mode\n");
     }
+
     if (ioctl(dev->groupfd, VFIO_GROUP_GET_STATUS, &group_status) < 0) {
         printf("ioctl VFIO_GROUP_GET_STATUS\n");
         goto error;
     }
+
     if (!(group_status.flags & VFIO_GROUP_FLAGS_VIABLE)) {
         printf("group not viable %#x\n", group_status.flags);
         goto error;
     }
+
     if (ioctl(dev->groupfd, VFIO_GROUP_SET_CONTAINER, &dev->contfd) < 0) {
         printf("ioctl VFIO_GROUP_SET_CONTAINER\n");
         goto error;
     }
 
-    if (ioctl(dev->contfd, VFIO_SET_IOMMU, VFIO_TYPE1_IOMMU) < 0) {
-        printf("ioctl VFIO_SET_IOMMU\n");
-        goto error;
-    }
-    if (ioctl(dev->contfd, VFIO_IOMMU_GET_INFO, &iommu_info) < 0) {
-        printf("ioctl VFIO_IOMMU_GET_INFO\n");
-        goto error;
+    if(no_iommu_mode){
+        if (ioctl(dev->contfd, VFIO_CHECK_EXTENSION, VFIO_NOIOMMU_IOMMU) == 0) {
+            printf("Does not support no-iommu\n");
+            goto error;
+        }
+        if (ioctl(dev->contfd, VFIO_SET_IOMMU, VFIO_NOIOMMU_IOMMU) < 0) {
+            printf("ioctl VFIO_SET_IOMMU\n");
+            goto error;
+        }
+
+    }else{
+        if (ioctl(dev->contfd, VFIO_CHECK_EXTENSION, VFIO_TYPE1_IOMMU) == 0) {
+            printf("Does not support iommu\n");
+            goto error;
+        }
+
+        if (ioctl(dev->contfd, VFIO_SET_IOMMU, VFIO_TYPE1_IOMMU) < 0) {
+            printf("ioctl VFIO_SET_IOMMU\n");
+            goto error;
+        }
+        if (ioctl(dev->contfd, VFIO_IOMMU_GET_INFO, &iommu_info) < 0) {
+            printf("ioctl VFIO_IOMMU_GET_INFO\n");
+            goto error;
+        }
     }
 
     dev->fd = ioctl(dev->groupfd, VFIO_GROUP_GET_DEVICE_FD, pciname);
@@ -638,8 +635,6 @@ error:
     delete_instance((nvme_dev_t*)dev);
     return NULL;
 }
-
-
 
 void delete_instance(nvme_dev_t* vdev)
 {
